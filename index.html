@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ライフゲーム PC-8001風 (80x50解像度 8倍表示)</title>
+    <style>
+        body {
+            font-family: 'MS Gothic', 'Osaka-mono', monospace;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+            touch-action: manipulation;
+        }
+        .game-title {
+            font-size: 24px;
+            margin-bottom: 15px;
+            color: #00ff00;
+            text-shadow: 0 0 3px #00ff00;
+        }
+        .game-container {
+            border: 3px solid #444;
+            padding: 4px;
+            background-color: #000000;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.7);
+            margin-bottom: 15px;
+            width: 640px; 
+            height: 400px;
+        }
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+            width: 640px; 
+            height: 400px; 
+            background-color: #000000;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        button {
+            padding: 10px 18px;
+            font-size: 16px;
+            font-family: inherit;
+            background-color: #3a3a3a;
+            color: #e0e0e0;
+            border: 2px solid #555;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s, box-shadow 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        button:hover {
+            background-color: #4a4a4a;
+            box-shadow: 0 3px 6px rgba(0,0,0,0.4);
+        }
+        button:active {
+            background-color: #2a2a2a;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+        }
+        #generationDisplay {
+            font-size: 16px;
+            color: #00c000;
+            background-color: #111;
+            padding: 5px 10px;
+            border-radius: 3px;
+            border: 1px solid #333;
+        }
+        @media (max-width: 660px) {
+            .game-title { font-size: 20px; }
+            button { padding: 12px 15px; font-size: 14px; }
+            .controls { flex-direction: column; align-items: center; width: 100%; }
+            .controls button { width: 180px; }
+            .game-container {
+                width: 95vw;
+                height: calc(95vw * (50 / 80)); 
+                padding: calc(4 / 640 * 95vw); 
+                border-width: calc(3 / 640 * 95vw);
+            }
+            canvas { width: 100%; height: 100%; }
+        }
+         @media (max-width: 480px) {
+            .controls button { width: 150px; }
+         }
+    </style>
+</head>
+<body>
+    <h1 class="game-title">ライフゲーム (PC-8001風)</h1>
+    <div class="game-container">
+        <canvas id="gameCanvas"></canvas>
+    </div>
+    <div class="controls">
+        <button id="startButton">スタート</button>
+        <button id="resetButton">リセット</button>
+    </div>
+    <div id="generationDisplay">世代: 0</div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const logicalWidth = 80;
+        const logicalHeight = 50;
+        canvas.width = logicalWidth;
+        canvas.height = logicalHeight;
+        const ctx = canvas.getContext('2d');
+
+        const startButton = document.getElementById('startButton');
+        const resetButton = document.getElementById('resetButton');
+        const generationDisplay = document.getElementById('generationDisplay');
+
+        const cellSize = 1;
+        const gridWidth = logicalWidth / cellSize;
+        const gridHeight = logicalHeight / cellSize;
+
+        const FADE_STEPS = 4; 
+        const GENERATION_INTERVAL = 150;
+
+        let trueGrid;
+        let displayGrid;
+        let isPlaying = false;
+        let animationFrameId = null; // メインゲームループ用
+        let pauseFadeAnimationId = null; // ポーズ時フェードアウト用
+        let generationCounter = 0;
+        let lastUpdateTime = 0;
+
+        function initializeGrids() {
+            trueGrid = Array(gridHeight).fill(null).map(() => Array(gridWidth).fill(0));
+            displayGrid = Array(gridHeight).fill(null).map(() => Array(gridWidth).fill(0));
+        }
+
+        function drawDisplayGrid() {
+            ctx.clearRect(0, 0, logicalWidth, logicalHeight);
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    if (displayGrid[y][x] > 0) {
+                        ctx.fillStyle = `rgba(224, 224, 224, ${displayGrid[y][x]})`;
+                        ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+                    }
+                }
+            }
+        }
+
+        function countAliveNeighbors(x, y, sourceGrid) {
+            let count = 0;
+            for (let i = -1; i <= 1; i++) {
+                for (let j = -1; j <= 1; j++) {
+                    if (i === 0 && j === 0) continue;
+                    const nx = x + i;
+                    const ny = y + j;
+                    if (nx >= 0 && nx < gridWidth && ny >= 0 && ny < gridHeight && sourceGrid[ny][nx] === 1) {
+                        count++;
+                    }
+                }
+            }
+            return count;
+        }
+
+        function updateGame() {
+            // この関数は isPlaying が true の時だけ gameLoop から呼ばれる
+            const nextTrueGrid = trueGrid.map(arr => arr.slice());
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const aliveNeighbors = countAliveNeighbors(x, y, trueGrid);
+                    const currentTrueState = trueGrid[y][x];
+                    if (currentTrueState === 1) { 
+                        if (aliveNeighbors < 2 || aliveNeighbors > 3) {
+                            nextTrueGrid[y][x] = 0; 
+                        } else {
+                            nextTrueGrid[y][x] = 1; 
+                        }
+                    } else { 
+                        if (aliveNeighbors === 3) {
+                            nextTrueGrid[y][x] = 1; 
+                        } else {
+                            nextTrueGrid[y][x] = 0; 
+                        }
+                    }
+                }
+            }
+
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const newTrueState = nextTrueGrid[y][x];
+                    const oldTrueState = trueGrid[y][x];
+                    const currentDisplayValue = displayGrid[y][x];
+
+                    if (newTrueState === 1) {
+                        displayGrid[y][x] = 1; 
+                    } else { 
+                        if (oldTrueState === 1) { 
+                            displayGrid[y][x] = 1 - (1 / FADE_STEPS); 
+                        } else { 
+                            displayGrid[y][x] = Math.max(0, currentDisplayValue - (1 / FADE_STEPS));
+                        }
+                    }
+                }
+            }
+            
+            trueGrid = nextTrueGrid; 
+            generationCounter++;
+            generationDisplay.textContent = `世代: ${generationCounter}`;
+        }
+
+        function gameLoop(timestamp) {
+            if (!isPlaying) { // isPlayingがfalseならメインループは何もしない
+                animationFrameId = null; //念のためクリア
+                return;
+            }
+            animationFrameId = requestAnimationFrame(gameLoop);
+            if (timestamp - lastUpdateTime >= GENERATION_INTERVAL) {
+                updateGame();
+                drawDisplayGrid();
+                lastUpdateTime = timestamp;
+            }
+        }
+        
+        // ポーズ時にフェードアウトを完了させるアニメーション
+        function animatePauseFadeOut() {
+            let currentFadeStep = 0;
+            function fadeStepLoop() {
+                currentFadeStep++;
+                let stillFading = false;
+                for (let y = 0; y < gridHeight; y++) {
+                    for (let x = 0; x < gridWidth; x++) {
+                        // 既にフェード中のセルのみを対象
+                        if (displayGrid[y][x] > 0 && displayGrid[y][x] < 1) {
+                            displayGrid[y][x] = Math.max(0, displayGrid[y][x] - (1 / FADE_STEPS));
+                            if (displayGrid[y][x] > 0) {
+                                stillFading = true;
+                            }
+                        }
+                    }
+                }
+                drawDisplayGrid();
+
+                if (currentFadeStep < FADE_STEPS && stillFading) {
+                    pauseFadeAnimationId = requestAnimationFrame(fadeStepLoop);
+                } else {
+                    pauseFadeAnimationId = null; // アニメーション終了
+                }
+            }
+            // 既存のポーズフェードアニメーションがあればキャンセル
+            if (pauseFadeAnimationId) {
+                cancelAnimationFrame(pauseFadeAnimationId);
+            }
+            pauseFadeAnimationId = requestAnimationFrame(fadeStepLoop);
+        }
+
+
+        function handleCanvasClick(event) {
+            if (isPlaying) return; // プレイ中は編集不可
+            // ポーズ中のフェードアウトアニメーションが動いていても、グリッド編集は許可する
+            // (ただし、編集結果は即時 displayGrid にも反映)
+
+            const rect = canvas.getBoundingClientRect();
+            const clickXInCanvas = event.clientX - rect.left;
+            const clickYInCanvas = event.clientY - rect.top;
+            const logicalX = Math.floor(clickXInCanvas * (logicalWidth / rect.width));
+            const logicalY = Math.floor(clickYInCanvas * (logicalHeight / rect.height));
+            const x = Math.floor(logicalX / cellSize);
+            const y = Math.floor(logicalY / cellSize);
+
+            if (x >= 0 && x < gridWidth && y >= 0 && y < gridHeight) {
+                trueGrid[y][x] = trueGrid[y][x] === 1 ? 0 : 1;
+                displayGrid[y][x] = trueGrid[y][x]; 
+                drawDisplayGrid();
+            }
+        }
+
+        function handleStartButtonClick() {
+            // もしポーズ時のフェードアウトアニメーションが実行中なら停止
+            if (pauseFadeAnimationId) {
+                cancelAnimationFrame(pauseFadeAnimationId);
+                pauseFadeAnimationId = null;
+            }
+
+            isPlaying = !isPlaying;
+            if (isPlaying) { // スタートまたは再開
+                startButton.textContent = 'ポーズ';
+                lastUpdateTime = performance.now(); 
+                if (!animationFrameId) { // 多重起動防止
+                   gameLoop(lastUpdateTime);
+                }
+            } else { // ポーズ
+                startButton.textContent = 'スタート';
+                // メインゲームループは isPlaying フラグで停止するので、ここでは cancelAnimationFrame は不要
+                // animationFrameId は gameLoop の先頭で null 化される
+                animatePauseFadeOut(); // ポーズ時のフェードアウトを開始
+            }
+        }
+
+        function handleResetButtonClick() {
+            isPlaying = false;
+            if (animationFrameId) { // メインループが動いていれば止める
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            if (pauseFadeAnimationId) { // ポーズフェードが動いていれば止める
+                cancelAnimationFrame(pauseFadeAnimationId);
+                pauseFadeAnimationId = null;
+            }
+
+            startButton.textContent = 'スタート';
+            generationCounter = 0;
+            generationDisplay.textContent = `世代: ${generationCounter}`;
+            initializeGrids();
+            drawDisplayGrid();
+        }
+        
+        function setup() {
+            initializeGrids();
+            drawDisplayGrid();
+            canvas.addEventListener('click', handleCanvasClick);
+            canvas.addEventListener('touchstart', function(event) {
+                if (event.touches.length === 1) {
+                    handleCanvasClick(event.touches[0]);
+                }
+            }, { passive: false });
+            startButton.addEventListener('click', handleStartButtonClick);
+            resetButton.addEventListener('click', handleResetButtonClick);
+        }
+        setup();
+    </script>
+</body>
+</html>
